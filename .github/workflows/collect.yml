@@ -2,8 +2,8 @@ name: Collect Seat Data
 
 on:
   schedule:
-    - cron: "0,10,20,30,40,50 * * * *"   # 매 10분마다 실행 (UTC 기준)
-  workflow_dispatch:          # 수동 실행 허용
+    - cron: "*/10 * * * *"   # 매 10분마다 (UTC)
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -13,35 +13,123 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-          cache: pip
-          cache-dependency-path: scraper/requirements.txt
-
-      - name: Install dependencies
-        run: pip install -r scraper/requirements.txt
-
-      - name: Run scraper
-        id: scraper
+      # ── 1. 서버 상태 확인 ──────────────────────────────────────
+      - name: Check server status
+        id: health
         run: |
-          output=$(python scraper/scraper.py 2>&1)
-          echo "$output"
-          if echo "$output" | grep -q "^NEW_DATA=true"; then
-            echo "new_data=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "new_data=false" >> "$GITHUB_OUTPUT"
-          fi
+          code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "${{ secrets.CLOUDTYPE_URL }}/status" || echo "000")
+          echo "http_code=$code" >> "$GITHUB_OUTPUT"
+          echo "Server responded: $code"
 
-      - name: Commit new data
-        if: steps.scraper.outputs.new_data == 'true'
+      # ── 2. 꺼져 있으면 ctype CLI로 재시작 ─────────────────────
+      - name: Restart server if down
+        if: steps.health.outputs.http_code != '200'
+        run: |
+          npm install -g @cloudtype/cli --silent
+          ctype auth:login --token "${{ secrets.CLOUDTYPE_TOKEN }}"
+          ctype app:restart --name djlib-seat-server
+          echo "Waiting 30s for server to start..."
+          sleep 30
+
+      # ── 3. 수집 요청 ───────────────────────────────────────────
+      - name: Collect data
+        id: collect
+        run: |
+          response=$(curl -s --max-time 25 "${{ secrets.CLOUDTYPE_URL }}/collect")
+          echo "response=$response" >> "$GITHUB_OUTPUT"
+          echo "Response: $response"
+
+      # ── 4. 응답 처리 (Python) ──────────────────────────────────
+      - name: Process response
+        id: process
+        run: |
+          python3 - <<'PYEOF'
+          import json, csv, os, sys
+          from datetime import datetime, timezone, timedelta
+
+          KST = timezone(timedelta(hours=9))
+          CSV_PATH  = "data/seats.csv"
+          LOG_PATH  = "logs/error.log"
+          FIELDNAMES = ["collected_at", "room_name", "used_seats", "waiting"]
+
+          raw = os.environ.get("COLLECT_RESPONSE", "")
+          try:
+              resp = json.loads(raw)
+          except json.JSONDecodeError:
+              resp = {"status": "error", "message": f"invalid json: {raw[:200]}"}
+
+          status = resp.get("status")
+
+          # ── no_data: 커밋 없음 ─────────────────────────────────
+          if status == "no_data":
+              print("no_data: skip commit")
+              with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+                  f.write("should_commit=false\n")
+                  f.write("commit_msg=\n")
+              sys.exit(0)
+
+          # ── error: error.log에 기록 ────────────────────────────
+          if status == "error":
+              ts = datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S")
+              msg = resp.get("message", "unknown error")
+              os.makedirs("logs", exist_ok=True)
+              with open(LOG_PATH, "a") as f:
+                  f.write(f"{ts} | [ERROR] {msg}\n")
+              print(f"Error logged: {msg}")
+              with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+                  f.write("should_commit=true\n")
+                  f.write(f"commit_msg=log: error at {ts}\n")
+              sys.exit(0)
+
+          # ── ok: CSV에 append ───────────────────────────────────
+          rows = resp.get("data", [])
+          if not rows:
+              with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+                  f.write("should_commit=false\n")
+              sys.exit(0)
+
+          # 기존 (collected_at, room_name) 중복 확인
+          existing = set()
+          if os.path.exists(CSV_PATH):
+              with open(CSV_PATH, newline="", encoding="utf-8") as f:
+                  for r in csv.DictReader(f):
+                      existing.add((r["collected_at"], r["room_name"]))
+
+          new_rows = [r for r in rows
+                      if (r["collected_at"], r["room_name"]) not in existing]
+
+          if not new_rows:
+              print(f"skip: all {len(rows)} rows already exist")
+              with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+                  f.write("should_commit=false\n")
+              sys.exit(0)
+
+          os.makedirs("data", exist_ok=True)
+          file_exists = os.path.exists(CSV_PATH)
+          with open(CSV_PATH, "a", newline="", encoding="utf-8") as f:
+              writer = csv.DictWriter(f, fieldnames=FIELDNAMES)
+              if not file_exists:
+                  writer.writeheader()
+              writer.writerows(new_rows)
+
+          ts = new_rows[0]["collected_at"]
+          print(f"ok: {len(new_rows)} rows appended (at {ts})")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write("should_commit=true\n")
+              f.write(f"commit_msg=data: collect {ts} ({len(new_rows)} rows)\n")
+          PYEOF
+        env:
+          COLLECT_RESPONSE: ${{ steps.collect.outputs.response }}
+
+      # ── 5. 변경사항 있을 때만 커밋 ────────────────────────────
+      - name: Commit changes
+        if: steps.process.outputs.should_commit == 'true'
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add data/seats.csv
-          git commit -m "chore: collect seat data $(date -u +'%Y-%m-%d %H:%M UTC')"
+          git add data/seats.csv logs/error.log
+          git commit -m "${{ steps.process.outputs.commit_msg }}"
           git push
