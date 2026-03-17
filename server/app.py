@@ -1,4 +1,6 @@
 import sys
+import threading
+import time
 from datetime import datetime, timezone, timedelta
 
 import requests
@@ -17,7 +19,37 @@ HEADERS = {
     ),
     "Accept-Language": "ko-KR,ko;q=0.9",
 }
+SCRAPE_INTERVAL = 300  # 5분마다 백그라운드 수집
 
+_cache: dict = {"rows": None, "error": None}
+_lock = threading.Lock()
+
+
+# ── 백그라운드 스크래퍼 ────────────────────────────────────────────
+
+def scrape_once():
+    try:
+        resp = requests.get(URL, headers=HEADERS, timeout=20)
+        resp.raise_for_status()
+        rows = parse(resp.content)
+        with _lock:
+            _cache["rows"] = rows
+            _cache["error"] = None
+    except Exception as e:
+        with _lock:
+            _cache["error"] = str(e)
+
+
+def background_loop():
+    while True:
+        scrape_once()
+        time.sleep(SCRAPE_INTERVAL)
+
+
+threading.Thread(target=background_loop, daemon=True).start()
+
+
+# ── 엔드포인트 ────────────────────────────────────────────────────
 
 @app.route("/status")
 def status():
@@ -26,28 +58,29 @@ def status():
 
 @app.route("/collect")
 def collect():
-    try:
-        resp = requests.get(URL, headers=HEADERS, timeout=20)
-        resp.raise_for_status()
-        html = resp.content
-    except Exception as e:
-        return jsonify({"status": "error", "message": f"fetch failed: {e}"}), 200
+    with _lock:
+        rows = _cache["rows"]
+        error = _cache["error"]
 
-    try:
-        rows = parse(html)
-    except Exception as e:
-        return jsonify({"status": "error", "message": f"parse failed: {e}"}), 200
+    # 캐시 비어있으면 (콜드스타트 직후) 즉시 동기 스크래핑
+    if rows is None and error is None:
+        scrape_once()
+        with _lock:
+            rows = _cache["rows"]
+            error = _cache["error"]
 
+    if error:
+        return jsonify({"status": "error", "message": error}), 200
     if not rows:
         return jsonify({"status": "no_data"}), 200
-
     return jsonify({"status": "ok", "data": rows}), 200
 
+
+# ── 파서 ──────────────────────────────────────────────────────────
 
 def parse(html: bytes) -> list[dict]:
     soup = BeautifulSoup(html, "html.parser", from_encoding="euc-kr")
 
-    # 수집 시각: 페이지 상단 타임스탬프 우선, 없으면 현재 KST
     collected_at = datetime.now(KST).strftime("%Y-%m-%d %H:%M")
     ts_td = soup.find("td", attrs={"colspan": "6"})
     if ts_td:
@@ -59,7 +92,6 @@ def parse(html: bytes) -> list[dict]:
             except ValueError:
                 pass
 
-    # 전체 대기자수 파싱 (aggregate)
     waiting_total = 0
     for td in soup.find_all("td"):
         text = td.get_text(strip=True)
@@ -72,7 +104,6 @@ def parse(html: bytes) -> list[dict]:
                     pass
             break
 
-    # 좌석 현황 테이블 파싱
     rows = []
     for table in soup.find_all("table"):
         if "전체 좌석수" not in table.get_text():
@@ -94,7 +125,7 @@ def parse(html: bytes) -> list[dict]:
                 "used_seats": used_seats,
                 "waiting": waiting_total,
             })
-        break  # 첫 번째 좌석 테이블만
+        break
 
     return rows
 
