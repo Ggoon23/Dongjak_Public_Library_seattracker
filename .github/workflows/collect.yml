@@ -16,17 +16,21 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # ── 1. 서버 상태 확인 ──────────────────────────────────────
+      # ── 1. 서버 상태 확인 (body에 "ok" 포함 여부까지 검증) ────
       - name: Check server status
         id: health
         run: |
-          code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "${{ secrets.CLOUDTYPE_URL }}/status" || echo "000")
-          echo "http_code=$code" >> "$GITHUB_OUTPUT"
-          echo "Server responded: $code"
+          body=$(curl -s --max-time 10 "${{ secrets.CLOUDTYPE_URL }}/status" || echo "")
+          echo "body: $body"
+          if echo "$body" | grep -q '"ok"'; then
+            echo "alive=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "alive=false" >> "$GITHUB_OUTPUT"
+          fi
 
       # ── 2. 꺼져 있으면 ctype CLI로 재시작 ─────────────────────
       - name: Restart server if down
-        if: steps.health.outputs.http_code != '200'
+        if: steps.health.outputs.alive != 'true'
         run: |
           npm install -g @cloudtype/cli --silent
           ctype auth:login --token "${{ secrets.CLOUDTYPE_TOKEN }}"

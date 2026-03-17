@@ -7,7 +7,7 @@ Cloudtype 서버가 한국 IP를 사용하므로 도서관 서버 접근 차단 
 
 ```
 GitHub Actions (스케줄러 + 저장)
-    └─ 10분마다 실행
+    └─ 10분마다 실행 (KST 09:00~18:00)
         ├─ Cloudtype Flask 서버에 /collect 요청
         └─ 응답 데이터를 data/seats.csv에 append 후 커밋
 
@@ -18,14 +18,15 @@ Cloudtype Flask 서버 (스크래퍼)
 ## 파일 구성
 
 ```
-├── .github/workflows/collect.yml   # 10분마다 수집·저장
+├── .github/workflows/collect.yml   # 스케줄러 + 저장 워크플로우
 ├── server/
-│   ├── app.py                      # Flask API 서버
+│   ├── app.py                      # Flask API 서버 (Cloudtype 배포)
 │   └── requirements.txt
 ├── data/
 │   └── seats.csv                   # 누적 수집 데이터
 ├── logs/
 │   └── error.log                   # 에러 기록
+├── requirements.txt                # Cloudtype 패키지 설치용 (루트)
 └── cloudtype.yaml                  # Cloudtype 배포 설정
 ```
 
@@ -54,29 +55,28 @@ Cloudtype Flask 서버 (스크래퍼)
 
 | Secret 이름 | 값 |
 |---|---|
-| `CLOUDTYPE_URL` | Cloudtype 앱 URL (예: `https://xxx.run.goorm.io`) |
-| `CLOUDTYPE_TOKEN` | Cloudtype CLI 인증 토큰 |
+| `CLOUDTYPE_URL` | Cloudtype 서비스 URL (예: `https://xxxx.run.goorm.io`) |
+| `CLOUDTYPE_TOKEN` | Cloudtype API 토큰 |
 
 ## 배포 방법
 
 ### 1. Cloudtype 서버 배포
 
-1. [cloudtype.io](https://cloudtype.io) 로그인
-2. 새 서비스 생성 → 이 레포 연결
-3. 루트 디렉토리: `server/`, 포트: `3000`
-4. 배포 완료 후 서비스 URL 복사 → `CLOUDTYPE_URL` Secret에 저장
+1. [cloudtype.io](https://cloudtype.io) 로그인 → 새 서비스 생성 → 이 레포 연결
+2. 설정값 입력:
+   - **언어:** Python / Flask
+   - **서비스 이름:** `djlib-seat-server`
+   - **포트:** `3000`
+   - **Start command:** `pip install -r server/requirements.txt && gunicorn --chdir server app:app --bind 0.0.0.0:3000 --workers 1 --timeout 30`
+3. 배포 완료 후 서비스 URL 복사 → `CLOUDTYPE_URL` Secret에 저장
 
-### 2. Cloudtype CLI 토큰 발급
+### 2. Cloudtype API 토큰 발급
 
-```bash
-# Cloudtype 대시보드 → 계정 설정 → API 토큰 발급
-# 발급된 토큰을 CLOUDTYPE_TOKEN Secret에 저장
-```
+Cloudtype 대시보드 → 우측 상단 프로필 → 설정 → API 토큰 발급 → `CLOUDTYPE_TOKEN` Secret에 저장
 
 ### 3. GitHub Actions 활성화
 
-- push 후 Actions 탭에서 워크플로우 확인
-- **Run workflow** 버튼으로 수동 첫 실행 테스트 권장
+push 후 Actions 탭 → **Run workflow** 로 수동 첫 실행 테스트
 
 ## 워크플로우 동작 순서
 
