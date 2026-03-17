@@ -42,7 +42,10 @@ jobs:
       - name: Collect data
         id: collect
         run: |
-          response=$(curl -s --max-time 25 "${{ secrets.CLOUDTYPE_URL }}/collect")
+          response=$(curl -s -L --max-time 25 \
+            -H "Accept: application/json" \
+            -H "User-Agent: Mozilla/5.0 (compatible; seat-collector/1.0)" \
+            "${{ secrets.CLOUDTYPE_URL }}/collect")
           echo "response=$response" >> "$GITHUB_OUTPUT"
           echo "Response: $response"
 
