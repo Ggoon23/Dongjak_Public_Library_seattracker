@@ -2,8 +2,7 @@ name: Collect Seat Data
 
 on:
   schedule:
-    - cron: "*/10 0-8 * * *"  # 09:00~17:50 KST (UTC 00:00~08:50)
-    - cron: "0 9 * * *"       # 18:00 KST (UTC 09:00)
+    - cron: "*/10 * * * *"    # 매 10분마다 (UTC) - 테스트용 24시간
   workflow_dispatch:
 
 permissions:
