@@ -7,12 +7,13 @@ Cloudtype 서버가 한국 IP를 사용하므로 도서관 서버 접근 차단 
 
 ```
 GitHub Actions (스케줄러 + 저장)
-    └─ 10분마다 실행 (KST 09:00~18:00)
+    └─ 10분마다 실행 (KST 08:00~18:00)
         ├─ Cloudtype Flask 서버에 /collect 요청
         └─ 응답 데이터를 data/seats.csv에 append 후 커밋
 
 Cloudtype Flask 서버 (스크래퍼)
-    └─ 도서관 페이지 scraping → JSON 반환
+    └─ 5분마다 백그라운드 수집 → 캐시 저장
+    └─ /collect 호출 시 캐시 즉시 반환 (콜드스타트 시 동기 수집)
 ```
 
 ## 파일 구성
