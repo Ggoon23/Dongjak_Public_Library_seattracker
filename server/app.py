@@ -58,6 +58,7 @@ def parse(html: bytes) -> list[dict]:
             except ValueError:
                 pass
 
+    # 대기자 리스트 ("호출 대기 리스트"와 구분)
     waiting_per_room: dict[str, int] = {}
     for table in soup.find_all("table"):
         if "대기자 리스트" not in table.get_text() or "호출" in table.get_text():
@@ -71,6 +72,22 @@ def parse(html: bytes) -> list[dict]:
                 continue
             room = texts[1]
             waiting_per_room[room] = waiting_per_room.get(room, 0) + 1
+        break
+
+    # 호출 대기 리스트 (호출됐지만 아직 착석 전 — 실질적 이용자로 간주)
+    called_per_room: dict[str, int] = {}
+    for table in soup.find_all("table"):
+        if "호출 대기 리스트" not in table.get_text():
+            continue
+        for tr in table.find_all("tr"):
+            tds = tr.find_all("td")
+            if len(tds) < 2:
+                continue
+            texts = [td.get_text(strip=True) for td in tds]
+            if not texts[0].isdigit():
+                continue
+            room = texts[1]
+            called_per_room[room] = called_per_room.get(room, 0) + 1
         break
 
     rows = []
@@ -89,7 +106,9 @@ def parse(html: bytes) -> list[dict]:
                 used_seats  = int(texts[3])
             except ValueError:
                 continue
-            room_name = texts[1]
+            room_name  = texts[1]
+            called     = called_per_room.get(room_name, 0)
+            used_seats = min(used_seats + called, total_seats)
             rows.append({
                 "collected_at": collected_at,
                 "room_name":    room_name,
