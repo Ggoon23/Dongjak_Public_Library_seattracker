@@ -8,7 +8,7 @@ import requests
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from bs4 import BeautifulSoup
-from flask import Flask, jsonify
+from flask import Flask, jsonify, send_file
 
 app = Flask(__name__)
 
@@ -170,6 +170,32 @@ scheduler.start()
 
 
 # ── 엔드포인트 ────────────────────────────────────────────────────
+
+@app.route("/")
+def dashboard():
+    """좌석 현황 대시보드"""
+    return send_file(os.path.join(os.path.dirname(__file__), "..", "data", "seats_dashboard.html"))
+
+
+@app.route("/api/seats")
+def seats():
+    """seats.csv를 JSON으로 반환"""
+    rows = []
+    csv_path = os.path.join(os.path.dirname(__file__), "..", CSV_PATH)
+    try:
+        with open(csv_path, newline="", encoding="utf-8") as f:
+            for row in csv.DictReader(f):
+                rows.append({
+                    "collected_at": row["collected_at"],
+                    "room_name":    row["room_name"],
+                    "total_seats":  int(row["total_seats"]),
+                    "used_seats":   int(row["used_seats"]),
+                    "waiting":      int(row["waiting"]),
+                })
+    except FileNotFoundError:
+        return jsonify({"status": "error", "message": "seats.csv not found"}), 404
+    return jsonify(rows)
+
 
 @app.route("/status")
 def status():
