@@ -3,6 +3,7 @@ import csv
 import io
 import os
 from datetime import datetime, timezone, timedelta
+from pathlib import Path
 
 import requests
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -12,12 +13,13 @@ from flask import Flask, jsonify, send_file
 
 app = Flask(__name__)
 
-KST         = timezone(timedelta(hours=9))
-LIB_URL     = "http://djlib-seat.sen.go.kr/domian5.php"
+KST          = timezone(timedelta(hours=9))
+LIB_URL      = "http://djlib-seat.sen.go.kr/domian5.php"
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
 GITHUB_REPO  = os.environ.get("GITHUB_REPO", "")   # "유저명/레포명"
 CSV_PATH     = "data/seats.csv"
 FIELDNAMES   = ["collected_at", "room_name", "total_seats", "used_seats", "waiting"]
+LOCAL_CSV    = Path(__file__).parent.parent / CSV_PATH
 LIB_HEADERS  = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -50,7 +52,6 @@ def parse(html: bytes) -> list[dict]:
             except ValueError:
                 pass
 
-    # 열람실별 대기자수 카운트 ("대기자 리스트" 테이블 — "호출 대기 리스트"와 구분)
     waiting_per_room: dict[str, int] = {}
     for table in soup.find_all("table"):
         if "대기자 리스트" not in table.get_text() or "호출" in table.get_text():
@@ -95,11 +96,68 @@ def parse(html: bytes) -> list[dict]:
     return rows
 
 
+# ── 로컬 CSV ──────────────────────────────────────────────────────
+
+def init_local_csv():
+    """서버 시작 시 GitHub에서 최신 CSV를 로컬로 pull"""
+    if not GITHUB_TOKEN or not GITHUB_REPO:
+        # 환경변수 없으면 로컬 파일만 사용
+        if not LOCAL_CSV.exists():
+            LOCAL_CSV.parent.mkdir(parents=True, exist_ok=True)
+            LOCAL_CSV.write_text(",".join(FIELDNAMES) + "\n", encoding="utf-8")
+        return
+
+    gh_headers = {
+        "Authorization": f"token {GITHUB_TOKEN}",
+        "Accept": "application/vnd.github.v3+json",
+    }
+    url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{CSV_PATH}"
+    try:
+        resp = requests.get(url, headers=gh_headers, timeout=10)
+        if resp.status_code == 200:
+            content = base64.b64decode(resp.json()["content"]).decode("utf-8")
+            LOCAL_CSV.parent.mkdir(parents=True, exist_ok=True)
+            LOCAL_CSV.write_text(content, encoding="utf-8")
+            print("[INIT] GitHub에서 CSV pull 완료")
+        elif resp.status_code == 404:
+            LOCAL_CSV.parent.mkdir(parents=True, exist_ok=True)
+            LOCAL_CSV.write_text(",".join(FIELDNAMES) + "\n", encoding="utf-8")
+            print("[INIT] GitHub에 CSV 없음 — 빈 파일 생성")
+        else:
+            print(f"[WARN] GitHub pull 실패 ({resp.status_code})")
+    except Exception as e:
+        print(f"[WARN] GitHub pull 오류: {e}")
+
+
+def append_to_local_csv(new_rows: list[dict]):
+    """중복 없이 로컬 CSV에 append"""
+    existing = set()
+    if LOCAL_CSV.exists():
+        with LOCAL_CSV.open(newline="", encoding="utf-8") as f:
+            for row in csv.DictReader(f):
+                existing.add((row["collected_at"], row["room_name"]))
+
+    to_add = [r for r in new_rows
+              if (r["collected_at"], r["room_name"]) not in existing]
+    if not to_add:
+        print(f"[SKIP] 중복 데이터 ({new_rows[0]['collected_at']})")
+        return
+
+    with LOCAL_CSV.open("a", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=FIELDNAMES)
+        writer.writerows(to_add)
+    print(f"[LOCAL] {len(to_add)}행 로컬 저장 ({to_add[0]['collected_at']})")
+
+
 # ── GitHub API 커밋 ───────────────────────────────────────────────
 
-def commit_to_github(new_rows: list[dict]):
+def commit_to_github():
+    """로컬 CSV 전체를 GitHub에 커밋"""
     if not GITHUB_TOKEN or not GITHUB_REPO:
         print("[WARN] GITHUB_TOKEN 또는 GITHUB_REPO 환경변수 없음")
+        return
+    if not LOCAL_CSV.exists():
+        print("[WARN] 로컬 CSV 없음 — 커밋 스킵")
         return
 
     gh_headers = {
@@ -108,46 +166,24 @@ def commit_to_github(new_rows: list[dict]):
     }
     url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{CSV_PATH}"
 
+    sha = None
     resp = requests.get(url, headers=gh_headers, timeout=10)
-
     if resp.status_code == 200:
-        file_data = resp.json()
-        sha = file_data["sha"]
-        current = base64.b64decode(file_data["content"]).decode("utf-8")
-    elif resp.status_code == 404:
-        sha = None
-        current = ",".join(FIELDNAMES) + "\n"
-    else:
+        sha = resp.json()["sha"]
+    elif resp.status_code != 404:
         resp.raise_for_status()
 
-    # 중복 제거
-    existing = set()
-    for row in csv.DictReader(io.StringIO(current)):
-        existing.add((row["collected_at"], row["room_name"]))
-
-    to_add = [r for r in new_rows
-              if (r["collected_at"], r["room_name"]) not in existing]
-
-    if not to_add:
-        print(f"[SKIP] 중복 데이터 ({new_rows[0]['collected_at']})")
-        return
-
-    # CSV append
-    if not current.endswith("\n"):
-        current += "\n"
-    for r in to_add:
-        current += f"{r['collected_at']},{r['room_name']},{r['total_seats']},{r['used_seats']},{r['waiting']}\n"
-
-    ts = to_add[0]["collected_at"]
+    content = LOCAL_CSV.read_text(encoding="utf-8")
+    ts = datetime.now(KST).strftime("%Y-%m-%d %H:%M")
     payload = {
-        "message": f"data: collect {ts} ({len(to_add)} rows)",
-        "content": base64.b64encode(current.encode("utf-8")).decode(),
+        "message": f"data: hourly commit {ts}",
+        "content": base64.b64encode(content.encode("utf-8")).decode(),
     }
     if sha:
         payload["sha"] = sha
 
     requests.put(url, headers=gh_headers, json=payload, timeout=10).raise_for_status()
-    print(f"[OK] {len(to_add)}행 커밋 완료 ({ts})")
+    print(f"[OK] GitHub 커밋 완료 ({ts})")
 
 
 # ── 스케줄 작업 ───────────────────────────────────────────────────
@@ -156,16 +192,27 @@ def collect_job():
     try:
         rows = scrape()
         if rows:
-            commit_to_github(rows)
+            append_to_local_csv(rows)
     except Exception as e:
         print(f"[ERROR] collect_job: {e}")
 
 
+def hourly_commit_job():
+    try:
+        commit_to_github()
+    except Exception as e:
+        print(f"[ERROR] hourly_commit_job: {e}")
+
+
+init_local_csv()
+
 scheduler = BackgroundScheduler(timezone=KST)
-# 08:00~17:50 KST — 매 10분
+# 08:00~17:50 KST — 매 10분 수집 후 로컬 저장
 scheduler.add_job(collect_job, CronTrigger(hour="8-17", minute="*/10", timezone=KST))
-# 18:00 KST
+# 18:00 KST — 마지막 수집
 scheduler.add_job(collect_job, CronTrigger(hour="18", minute="0", timezone=KST))
+# 매 정시 GitHub 커밋 (08~18시)
+scheduler.add_job(hourly_commit_job, CronTrigger(hour="8-18", minute="0", timezone=KST))
 scheduler.start()
 
 
@@ -174,34 +221,24 @@ scheduler.start()
 @app.route("/")
 def dashboard():
     """좌석 현황 대시보드"""
-    return send_file(os.path.join(os.path.dirname(__file__), "..", "data", "seats_dashboard.html"))
+    return send_file(Path(__file__).parent.parent / "data" / "seats_dashboard.html")
 
 
 @app.route("/api/seats")
 def seats():
-    """GitHub에서 최신 seats.csv를 읽어 JSON으로 반환"""
-    if not GITHUB_TOKEN or not GITHUB_REPO:
-        return jsonify({"status": "error", "message": "GITHUB_TOKEN 또는 GITHUB_REPO 환경변수 없음"}), 500
-
-    gh_headers = {
-        "Authorization": f"token {GITHUB_TOKEN}",
-        "Accept": "application/vnd.github.v3+json",
-    }
-    url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{CSV_PATH}"
-    resp = requests.get(url, headers=gh_headers, timeout=10)
-    if resp.status_code != 200:
-        return jsonify({"status": "error", "message": f"GitHub API {resp.status_code}"}), 502
-
-    content = base64.b64decode(resp.json()["content"]).decode("utf-8")
+    """로컬 CSV를 JSON으로 반환"""
+    if not LOCAL_CSV.exists():
+        return jsonify({"status": "error", "message": "seats.csv not found"}), 404
     rows = []
-    for row in csv.DictReader(io.StringIO(content)):
-        rows.append({
-            "collected_at": row["collected_at"],
-            "room_name":    row["room_name"],
-            "total_seats":  int(row["total_seats"]),
-            "used_seats":   int(row["used_seats"]),
-            "waiting":      int(row["waiting"]),
-        })
+    with LOCAL_CSV.open(newline="", encoding="utf-8") as f:
+        for row in csv.DictReader(f):
+            rows.append({
+                "collected_at": row["collected_at"],
+                "room_name":    row["room_name"],
+                "total_seats":  int(row["total_seats"]),
+                "used_seats":   int(row["used_seats"]),
+                "waiting":      int(row["waiting"]),
+            })
     return jsonify(rows)
 
 
@@ -217,7 +254,7 @@ def collect():
         rows = scrape()
         if not rows:
             return jsonify({"status": "no_data"}), 200
-        commit_to_github(rows)
+        append_to_local_csv(rows)
         return jsonify({"status": "ok", "rows": len(rows)}), 200
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 200
@@ -225,7 +262,7 @@ def collect():
 
 @app.route("/debug")
 def debug():
-    """파싱 결과 확인용 (커밋 없음)"""
+    """파싱 결과 확인용 (저장 없음)"""
     try:
         rows = scrape()
         return jsonify({"status": "ok", "data": rows}), 200
