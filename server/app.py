@@ -17,7 +17,7 @@ LIB_URL     = "http://djlib-seat.sen.go.kr/domian5.php"
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
 GITHUB_REPO  = os.environ.get("GITHUB_REPO", "")   # "유저명/레포명"
 CSV_PATH     = "data/seats.csv"
-FIELDNAMES   = ["collected_at", "room_name", "used_seats", "waiting"]
+FIELDNAMES   = ["collected_at", "room_name", "used_seats", "waiting", "usage_rate"]
 LIB_HEADERS  = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -50,16 +50,21 @@ def parse(html: bytes) -> list[dict]:
             except ValueError:
                 pass
 
-    waiting_total = 0
-    for td in soup.find_all("td"):
-        if "전체 대기자수" in td.get_text(strip=True):
-            b = td.find("b")
-            if b:
-                try:
-                    waiting_total = int(b.get_text(strip=True))
-                except ValueError:
-                    pass
-            break
+    # 열람실별 대기자수 카운트 (대기자 리스트 테이블)
+    waiting_per_room: dict[str, int] = {}
+    for table in soup.find_all("table"):
+        if "열람실명" not in table.get_text() or "좌석번호" not in table.get_text():
+            continue
+        for tr in table.find_all("tr"):
+            tds = tr.find_all("td")
+            if len(tds) < 2:
+                continue
+            texts = [td.get_text(strip=True) for td in tds]
+            if not texts[0].isdigit():
+                continue
+            room = texts[1]
+            waiting_per_room[room] = waiting_per_room.get(room, 0) + 1
+        break
 
     rows = []
     for table in soup.find_all("table"):
@@ -76,11 +81,17 @@ def parse(html: bytes) -> list[dict]:
                 used_seats = int(texts[3])
             except ValueError:
                 continue
+            try:
+                usage_rate = int(texts[5].replace("%", "").strip())
+            except ValueError:
+                usage_rate = 0
+            room_name = texts[1]
             rows.append({
                 "collected_at": collected_at,
-                "room_name": texts[1],
+                "room_name": room_name,
                 "used_seats": used_seats,
-                "waiting": waiting_total,
+                "waiting": waiting_per_room.get(room_name, 0),
+                "usage_rate": usage_rate,
             })
         break
 
@@ -128,7 +139,7 @@ def commit_to_github(new_rows: list[dict]):
     if not current.endswith("\n"):
         current += "\n"
     for r in to_add:
-        current += f"{r['collected_at']},{r['room_name']},{r['used_seats']},{r['waiting']}\n"
+        current += f"{r['collected_at']},{r['room_name']},{r['used_seats']},{r['waiting']},{r['usage_rate']}\n"
 
     ts = to_add[0]["collected_at"]
     payload = {
