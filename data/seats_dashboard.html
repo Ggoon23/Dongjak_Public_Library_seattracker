@@ -116,11 +116,24 @@
 <h1>📚 동작구립도서관 좌석 현황 대시보드</h1>
 <p class="subtitle" id="subtitle"></p>
 
-<!-- 날짜별 라인 차트 -->
+<!-- 날짜별 라인 차트 (룸별 3분할) -->
 <div class="section">
   <div class="section-title">⏱ 날짜별 좌석 점유율 추이</div>
   <div class="date-tabs" id="dateTabs"></div>
-  <canvas id="lineChart" height="70"></canvas>
+  <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px;">
+    <div>
+      <div style="font-size:0.78rem;font-weight:600;color:#2b6cb0;margin-bottom:8px;text-align:center;">1층 로비(나모아래)</div>
+      <canvas id="chart-1층 로비(나모아래)" height="160"></canvas>
+    </div>
+    <div>
+      <div style="font-size:0.78rem;font-weight:600;color:#276749;margin-bottom:8px;text-align:center;">1층 디지털학습실</div>
+      <canvas id="chart-1층 디지털학습실" height="160"></canvas>
+    </div>
+    <div>
+      <div style="font-size:0.78rem;font-weight:600;color:#c05621;margin-bottom:8px;text-align:center;">3층 자율학습실</div>
+      <canvas id="chart-3층 자율학습실" height="160"></canvas>
+    </div>
+  </div>
 </div>
 
 <!-- 요일별 평균 분석 -->
@@ -136,11 +149,11 @@
   <div id="accordion"></div>
 </div>
 
-<footer>seats.csv 기반 · 운영 종료(이용 0석) 시간대 제외 · 10분마다 자동 갱신</footer>
+<footer>seats.csv 기반 · 10분마다 자동 갱신</footer>
 
 <script>
-let lineChartInstance = null;
-let dowChartInstance  = null;
+const roomChartInstances = {};
+let dowChartInstance = null;
 
 const roomColors = {
   '1층 로비(나모아래)': { border: '#4299e1', bg: 'rgba(66,153,225,0.15)' },
@@ -162,37 +175,29 @@ function dateToKSTDow(dateStr) {
   return new Date(y, m - 1, d).getDay(); // 0=일 6=토
 }
 
-// ── 날짜별 라인 차트 ──────────────────────────────────────────────
-function renderLineChart(data, selectedDate) {
-  const dayData = data.filter(d => d.collected_at.startsWith(selectedDate));
-  const times   = [...new Set(dayData.map(d => d.collected_at))].sort();
-  const rooms   = [...new Set(dayData.map(d => d.room_name))];
+// ── 날짜별 룸별 3분할 차트 ───────────────────────────────────────
+function renderRoomChart(room, dayData) {
+  const col   = roomColors[room] || { border: '#aaa', bg: 'rgba(170,170,170,0.1)' };
+  const times = [...new Set(dayData.map(d => d.collected_at))].sort();
+  const [r, g, b] = col.border.slice(1).match(/.{2}/g).map(x => parseInt(x, 16));
 
-  const waitingDatasets = rooms.map(room => {
-    const col = roomColors[room] || { border: '#aaa', bg: 'rgba(170,170,170,0.1)' };
-    const [r, g, b] = col.border.match(/\w\w/g)
-      ? col.border.slice(1).match(/.{2}/g).map(x => parseInt(x, 16))
-      : [170, 170, 170];
-    return {
+  const datasets = [
+    {
       type: 'bar',
-      label: room + ' (대기)',
+      label: '대기',
       data: times.map(t => {
         const row = dayData.find(d => d.collected_at === t && d.room_name === room);
         return row ? row.waiting : 0;
       }),
-      backgroundColor: `rgba(${r},${g},${b},0.22)`,
+      backgroundColor: `rgba(${r},${g},${b},0.2)`,
       borderColor: col.border,
       borderWidth: 1,
       borderRadius: 3,
       yAxisID: 'yWait',
       order: 2,
-    };
-  });
-
-  const occupancyDatasets = rooms.map(room => {
-    const col = roomColors[room] || { border: '#aaa', bg: 'rgba(170,170,170,0.1)' };
-    return {
-      label: room + ' (점유율)',
+    },
+    {
+      label: '점유율',
       data: times.map(t => {
         const row = dayData.find(d => d.collected_at === t && d.room_name === room);
         return row ? pct(row) : null;
@@ -201,38 +206,42 @@ function renderLineChart(data, selectedDate) {
       backgroundColor: col.bg,
       fill: true,
       tension: 0.3,
-      pointRadius: 3,
-      pointHoverRadius: 5,
+      pointRadius: 2,
+      pointHoverRadius: 4,
       yAxisID: 'yPct',
       order: 1,
-    };
-  });
-
-  if (lineChartInstance) lineChartInstance.destroy();
-  lineChartInstance = new Chart(document.getElementById('lineChart'), {
-    type: 'line',
-    data: {
-      labels: times.map(t => t.slice(11, 16)),
-      datasets: [...waitingDatasets, ...occupancyDatasets],
     },
+  ];
+
+  const canvasId = 'chart-' + room;
+  if (roomChartInstances[room]) roomChartInstances[room].destroy();
+  roomChartInstances[room] = new Chart(document.getElementById(canvasId), {
+    type: 'line',
+    data: { labels: times.map(t => t.slice(11, 16)), datasets },
     options: {
       responsive: true,
       interaction: { mode: 'index', intersect: false },
       plugins: {
-        legend: { position: 'top' },
+        legend: { display: false },
         tooltip: { callbacks: {
           label: ctx => ctx.dataset.yAxisID === 'yPct'
-            ? ` ${ctx.dataset.label}: ${ctx.parsed.y}%`
-            : ` ${ctx.dataset.label}: ${ctx.parsed.y}명`
+            ? ` 점유율: ${ctx.parsed.y}%`
+            : ` 대기: ${ctx.parsed.y}명`
         }}
       },
       scales: {
-        yPct:  { type: 'linear', position: 'left',  min: 0, max: 100, ticks: { callback: v => v + '%' }, title: { display: true, text: '점유율 (%)' } },
-        yWait: { type: 'linear', position: 'right', min: 0, ticks: { stepSize: 1, callback: v => v + '명' }, title: { display: true, text: '대기자 (명)' }, grid: { drawOnChartArea: false } },
-        x:     { title: { display: true, text: '시각' } },
+        yPct:  { type: 'linear', position: 'left',  min: 0, max: 100, ticks: { callback: v => v + '%', font: { size: 10 } } },
+        yWait: { type: 'linear', position: 'right', min: 0, ticks: { stepSize: 1, callback: v => v + '명', font: { size: 10 } }, grid: { drawOnChartArea: false } },
+        x:     { ticks: { font: { size: 10 }, maxRotation: 45 } },
       }
     }
   });
+}
+
+function renderLineChart(data, selectedDate) {
+  const dayData = data.filter(d => d.collected_at.startsWith(selectedDate));
+  const rooms   = [...new Set(data.map(d => d.room_name))];
+  rooms.forEach(room => renderRoomChart(room, dayData));
 }
 
 // ── 요일별 평균 점유율 차트 ────────────────────────────────────────
@@ -368,14 +377,7 @@ let currentDate = null;
 let currentDow  = null;
 
 function renderDashboard(allData) {
-  // 운영 종료 시간대 제외
-  const closedTimes = new Set(
-    [...new Set(allData.map(d => d.collected_at))].filter(t => {
-      const rows = allData.filter(d => d.collected_at === t);
-      return rows.every(r => r.used_seats === 0);
-    })
-  );
-  const data  = allData.filter(d => !closedTimes.has(d.collected_at));
+  const data  = allData;
   const dates = [...new Set(data.map(d => d.collected_at.slice(0, 10)))].sort();
 
   document.getElementById('subtitle').textContent =

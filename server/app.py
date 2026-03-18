@@ -19,6 +19,12 @@ GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
 GITHUB_REPO  = os.environ.get("GITHUB_REPO", "")   # "유저명/레포명"
 CSV_PATH     = "data/seats.csv"
 FIELDNAMES   = ["collected_at", "room_name", "total_seats", "used_seats", "waiting"]
+# 룸별 운영 종료 시각 (해당 시각 이후 수집 제외)
+ROOM_CLOSE_HOUR = {
+    "1층 로비(나모아래)": 18,
+    "1층 디지털학습실":   18,
+    "3층 자율학습실":    22,
+}
 LOCAL_CSV    = Path(__file__).parent.parent / CSV_PATH
 LIB_HEADERS  = {
     "User-Agent": (
@@ -192,7 +198,11 @@ def collect_job():
     try:
         rows = scrape()
         if rows:
-            append_to_local_csv(rows)
+            now_hour = datetime.now(KST).hour
+            open_rows = [r for r in rows
+                         if now_hour < ROOM_CLOSE_HOUR.get(r["room_name"], 18)]
+            if open_rows:
+                append_to_local_csv(open_rows)
     except Exception as e:
         print(f"[ERROR] collect_job: {e}")
 
@@ -207,12 +217,12 @@ def hourly_commit_job():
 init_local_csv()
 
 scheduler = BackgroundScheduler(timezone=KST)
-# 08:00~17:50 KST — 매 10분 수집 후 로컬 저장
-scheduler.add_job(collect_job, CronTrigger(hour="8-17", minute="*/10", timezone=KST))
-# 18:00 KST — 마지막 수집
-scheduler.add_job(collect_job, CronTrigger(hour="18", minute="0", timezone=KST))
-# 매 정시 GitHub 커밋 (08~18시)
-scheduler.add_job(hourly_commit_job, CronTrigger(hour="8-18", minute="0", timezone=KST))
+# 08:00~21:50 KST — 매 10분 수집 (룸별 운영시간은 collect_job 내부에서 필터링)
+scheduler.add_job(collect_job, CronTrigger(hour="8-21", minute="*/10", timezone=KST))
+# 22:00 KST — 자율학습실 마지막 수집
+scheduler.add_job(collect_job, CronTrigger(hour="22", minute="0", timezone=KST))
+# 매 정시 GitHub 커밋 (08~22시)
+scheduler.add_job(hourly_commit_job, CronTrigger(hour="8-22", minute="0", timezone=KST))
 scheduler.start()
 
 
@@ -226,20 +236,51 @@ def dashboard():
 
 @app.route("/api/seats")
 def seats():
-    """로컬 CSV를 JSON으로 반환"""
-    if not LOCAL_CSV.exists():
-        return jsonify({"status": "error", "message": "seats.csv not found"}), 404
-    rows = []
-    with LOCAL_CSV.open(newline="", encoding="utf-8") as f:
-        for row in csv.DictReader(f):
-            rows.append({
-                "collected_at": row["collected_at"],
-                "room_name":    row["room_name"],
-                "total_seats":  int(row["total_seats"]),
-                "used_seats":   int(row["used_seats"]),
-                "waiting":      int(row["waiting"]),
-            })
-    return jsonify(rows)
+    """GitHub(최신) + 로컬(미커밋 신규분) 병합 후 JSON 반환"""
+    rows_by_key = {}
+
+    # 1) GitHub에서 커밋된 데이터 로드
+    if GITHUB_TOKEN and GITHUB_REPO:
+        try:
+            gh_headers = {
+                "Authorization": f"token {GITHUB_TOKEN}",
+                "Accept": "application/vnd.github.v3+json",
+            }
+            url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{CSV_PATH}"
+            resp = requests.get(url, headers=gh_headers, timeout=10)
+            if resp.status_code == 200:
+                content = base64.b64decode(resp.json()["content"]).decode("utf-8")
+                for row in csv.DictReader(io.StringIO(content)):
+                    key = (row["collected_at"], row["room_name"])
+                    rows_by_key[key] = {
+                        "collected_at": row["collected_at"],
+                        "room_name":    row["room_name"],
+                        "total_seats":  int(row["total_seats"]),
+                        "used_seats":   int(row["used_seats"]),
+                        "waiting":      int(row["waiting"]),
+                    }
+        except Exception as e:
+            print(f"[WARN] /api/seats GitHub 로드 실패: {e}")
+
+    # 2) 로컬 파일에서 미커밋 신규 데이터 추가
+    if LOCAL_CSV.exists():
+        with LOCAL_CSV.open(newline="", encoding="utf-8") as f:
+            for row in csv.DictReader(f):
+                key = (row["collected_at"], row["room_name"])
+                if key not in rows_by_key:
+                    rows_by_key[key] = {
+                        "collected_at": row["collected_at"],
+                        "room_name":    row["room_name"],
+                        "total_seats":  int(row["total_seats"]),
+                        "used_seats":   int(row["used_seats"]),
+                        "waiting":      int(row["waiting"]),
+                    }
+
+    if not rows_by_key:
+        return jsonify({"status": "error", "message": "데이터 없음"}), 404
+
+    result = sorted(rows_by_key.values(), key=lambda r: r["collected_at"])
+    return jsonify(result)
 
 
 @app.route("/status")
