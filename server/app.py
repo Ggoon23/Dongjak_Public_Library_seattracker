@@ -50,10 +50,10 @@ def parse(html: bytes) -> list[dict]:
             except ValueError:
                 pass
 
-    # 열람실별 대기자수 카운트 (대기자 리스트 테이블)
+    # 열람실별 대기자수 카운트 ("대기자 리스트" 테이블 — "호출 대기 리스트"와 구분)
     waiting_per_room: dict[str, int] = {}
     for table in soup.find_all("table"):
-        if "열람실명" not in table.get_text() or "좌석번호" not in table.get_text():
+        if "대기자 리스트" not in table.get_text() or "호출" in table.get_text():
             continue
         for tr in table.find_all("tr"):
             tds = tr.find_all("td")
