@@ -1,24 +1,15 @@
-name: Collect Seat Data
+name: Server Health Check
 
 on:
   schedule:
-    - cron: "*/10 23 * * *"   # 08:00~08:50 KST (UTC 23:00~23:50)
-    - cron: "*/10 0-8 * * *"  # 09:00~17:50 KST (UTC 00:00~08:50)
-    - cron: "0 9 * * *"       # 18:00 KST (UTC 09:00)
+    - cron: "0 * * * *"   # 매 시간 (UTC)
   workflow_dispatch:
 
-permissions:
-  contents: write
-
 jobs:
-  collect:
+  healthcheck:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      # ── 1. 서버 상태 확인 (body에 "ok" 포함 여부까지 검증) ────
       - name: Check server status
         id: health
         run: |
@@ -26,119 +17,28 @@ jobs:
           echo "body: $body"
           if echo "$body" | grep -q '"ok"'; then
             echo "alive=true" >> "$GITHUB_OUTPUT"
+            echo "Server is alive"
           else
             echo "alive=false" >> "$GITHUB_OUTPUT"
+            echo "Server is down"
           fi
 
-      # ── 2. 꺼져 있으면 ctype CLI로 재시작 ─────────────────────
       - name: Restart server if down
         if: steps.health.outputs.alive != 'true'
         run: |
           npm install -g @cloudtype/cli --silent
           ctype auth:login --token "${{ secrets.CLOUDTYPE_TOKEN }}"
           ctype app:restart --name djlib-seat-server
-          echo "Waiting 30s for server to start..."
+          echo "Restarted. Waiting 30s..."
           sleep 30
 
-      # ── 3. 수집 요청 ───────────────────────────────────────────
-      - name: Collect data
-        id: collect
+      - name: Verify after restart
+        if: steps.health.outputs.alive != 'true'
         run: |
-          response=$(curl -s -L --max-time 25 \
-            -H "Accept: application/json" \
-            -H "User-Agent: Mozilla/5.0 (compatible; seat-collector/1.0)" \
-            "${{ secrets.CLOUDTYPE_URL }}/collect")
-          echo "response=$response" >> "$GITHUB_OUTPUT"
-          echo "Response: $response"
-
-      # ── 4. 응답 처리 (Python) ──────────────────────────────────
-      - name: Process response
-        id: process
-        run: |
-          python3 - <<'PYEOF'
-          import json, csv, os, sys
-          from datetime import datetime, timezone, timedelta
-
-          KST = timezone(timedelta(hours=9))
-          CSV_PATH  = "data/seats.csv"
-          LOG_PATH  = "logs/error.log"
-          FIELDNAMES = ["collected_at", "room_name", "used_seats", "waiting"]
-
-          raw = os.environ.get("COLLECT_RESPONSE", "")
-          try:
-              resp = json.loads(raw)
-          except json.JSONDecodeError:
-              resp = {"status": "error", "message": f"invalid json: {raw[:200]}"}
-
-          status = resp.get("status")
-
-          # ── no_data: 커밋 없음 ─────────────────────────────────
-          if status == "no_data":
-              print("no_data: skip commit")
-              with open(os.environ["GITHUB_OUTPUT"], "a") as f:
-                  f.write("should_commit=false\n")
-                  f.write("commit_msg=\n")
-              sys.exit(0)
-
-          # ── error: error.log에 기록 ────────────────────────────
-          if status == "error":
-              ts = datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S")
-              msg = resp.get("message", "unknown error")
-              os.makedirs("logs", exist_ok=True)
-              with open(LOG_PATH, "a") as f:
-                  f.write(f"{ts} | [ERROR] {msg}\n")
-              print(f"Error logged: {msg}")
-              with open(os.environ["GITHUB_OUTPUT"], "a") as f:
-                  f.write("should_commit=true\n")
-                  f.write(f"commit_msg=log: error at {ts}\n")
-              sys.exit(0)
-
-          # ── ok: CSV에 append ───────────────────────────────────
-          rows = resp.get("data", [])
-          if not rows:
-              with open(os.environ["GITHUB_OUTPUT"], "a") as f:
-                  f.write("should_commit=false\n")
-              sys.exit(0)
-
-          # 기존 (collected_at, room_name) 중복 확인
-          existing = set()
-          if os.path.exists(CSV_PATH):
-              with open(CSV_PATH, newline="", encoding="utf-8") as f:
-                  for r in csv.DictReader(f):
-                      existing.add((r["collected_at"], r["room_name"]))
-
-          new_rows = [r for r in rows
-                      if (r["collected_at"], r["room_name"]) not in existing]
-
-          if not new_rows:
-              print(f"skip: all {len(rows)} rows already exist")
-              with open(os.environ["GITHUB_OUTPUT"], "a") as f:
-                  f.write("should_commit=false\n")
-              sys.exit(0)
-
-          os.makedirs("data", exist_ok=True)
-          file_exists = os.path.exists(CSV_PATH)
-          with open(CSV_PATH, "a", newline="", encoding="utf-8") as f:
-              writer = csv.DictWriter(f, fieldnames=FIELDNAMES)
-              if not file_exists:
-                  writer.writeheader()
-              writer.writerows(new_rows)
-
-          ts = new_rows[0]["collected_at"]
-          print(f"ok: {len(new_rows)} rows appended (at {ts})")
-          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
-              f.write("should_commit=true\n")
-              f.write(f"commit_msg=data: collect {ts} ({len(new_rows)} rows)\n")
-          PYEOF
-        env:
-          COLLECT_RESPONSE: ${{ steps.collect.outputs.response }}
-
-      # ── 5. 변경사항 있을 때만 커밋 ────────────────────────────
-      - name: Commit changes
-        if: steps.process.outputs.should_commit == 'true'
-        run: |
-          git config user.name  "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add data/seats.csv logs/error.log
-          git commit -m "${{ steps.process.outputs.commit_msg }}"
-          git push
+          body=$(curl -s --max-time 10 "${{ secrets.CLOUDTYPE_URL }}/status" || echo "")
+          if echo "$body" | grep -q '"ok"'; then
+            echo "Server recovered successfully"
+          else
+            echo "Server still down after restart"
+            exit 1
+          fi

@@ -1,17 +1,24 @@
-import sys
-import threading
-import time
+import base64
+import csv
+import io
+import os
 from datetime import datetime, timezone, timedelta
 
 import requests
+from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.cron import CronTrigger
 from bs4 import BeautifulSoup
 from flask import Flask, jsonify
 
 app = Flask(__name__)
 
-URL = "http://djlib-seat.sen.go.kr/domian5.php"
-KST = timezone(timedelta(hours=9))
-HEADERS = {
+KST         = timezone(timedelta(hours=9))
+LIB_URL     = "http://djlib-seat.sen.go.kr/domian5.php"
+GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
+GITHUB_REPO  = os.environ.get("GITHUB_REPO", "")   # "유저명/레포명"
+CSV_PATH     = "data/seats.csv"
+FIELDNAMES   = ["collected_at", "room_name", "used_seats", "waiting"]
+LIB_HEADERS  = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -19,64 +26,15 @@ HEADERS = {
     ),
     "Accept-Language": "ko-KR,ko;q=0.9",
 }
-SCRAPE_INTERVAL = 300  # 5분마다 백그라운드 수집
-
-_cache: dict = {"rows": None, "error": None}
-_lock = threading.Lock()
 
 
-# ── 백그라운드 스크래퍼 ────────────────────────────────────────────
+# ── 스크래핑 ──────────────────────────────────────────────────────
 
-def scrape_once():
-    try:
-        resp = requests.get(URL, headers=HEADERS, timeout=20)
-        resp.raise_for_status()
-        rows = parse(resp.content)
-        with _lock:
-            _cache["rows"] = rows
-            _cache["error"] = None
-    except Exception as e:
-        with _lock:
-            _cache["error"] = str(e)
+def scrape() -> list[dict]:
+    resp = requests.get(LIB_URL, headers=LIB_HEADERS, timeout=20)
+    resp.raise_for_status()
+    return parse(resp.content)
 
-
-def background_loop():
-    while True:
-        scrape_once()
-        time.sleep(SCRAPE_INTERVAL)
-
-
-threading.Thread(target=background_loop, daemon=True).start()
-
-
-# ── 엔드포인트 ────────────────────────────────────────────────────
-
-@app.route("/status")
-def status():
-    return jsonify({"status": "ok"})
-
-
-@app.route("/collect")
-def collect():
-    with _lock:
-        rows = _cache["rows"]
-        error = _cache["error"]
-
-    # 캐시 비어있으면 (콜드스타트 직후) 즉시 동기 스크래핑
-    if rows is None and error is None:
-        scrape_once()
-        with _lock:
-            rows = _cache["rows"]
-            error = _cache["error"]
-
-    if error:
-        return jsonify({"status": "error", "message": error}), 200
-    if not rows:
-        return jsonify({"status": "no_data"}), 200
-    return jsonify({"status": "ok", "data": rows}), 200
-
-
-# ── 파서 ──────────────────────────────────────────────────────────
 
 def parse(html: bytes) -> list[dict]:
     soup = BeautifulSoup(html, "html.parser", from_encoding="euc-kr")
@@ -94,8 +52,7 @@ def parse(html: bytes) -> list[dict]:
 
     waiting_total = 0
     for td in soup.find_all("td"):
-        text = td.get_text(strip=True)
-        if "전체 대기자수" in text:
+        if "전체 대기자수" in td.get_text(strip=True):
             b = td.find("b")
             if b:
                 try:
@@ -128,6 +85,100 @@ def parse(html: bytes) -> list[dict]:
         break
 
     return rows
+
+
+# ── GitHub API 커밋 ───────────────────────────────────────────────
+
+def commit_to_github(new_rows: list[dict]):
+    if not GITHUB_TOKEN or not GITHUB_REPO:
+        print("[WARN] GITHUB_TOKEN 또는 GITHUB_REPO 환경변수 없음")
+        return
+
+    gh_headers = {
+        "Authorization": f"token {GITHUB_TOKEN}",
+        "Accept": "application/vnd.github.v3+json",
+    }
+    url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{CSV_PATH}"
+
+    resp = requests.get(url, headers=gh_headers, timeout=10)
+
+    if resp.status_code == 200:
+        file_data = resp.json()
+        sha = file_data["sha"]
+        current = base64.b64decode(file_data["content"]).decode("utf-8")
+    elif resp.status_code == 404:
+        sha = None
+        current = ",".join(FIELDNAMES) + "\n"
+    else:
+        resp.raise_for_status()
+
+    # 중복 제거
+    existing = set()
+    for row in csv.DictReader(io.StringIO(current)):
+        existing.add((row["collected_at"], row["room_name"]))
+
+    to_add = [r for r in new_rows
+              if (r["collected_at"], r["room_name"]) not in existing]
+
+    if not to_add:
+        print(f"[SKIP] 중복 데이터 ({new_rows[0]['collected_at']})")
+        return
+
+    # CSV append
+    if not current.endswith("\n"):
+        current += "\n"
+    for r in to_add:
+        current += f"{r['collected_at']},{r['room_name']},{r['used_seats']},{r['waiting']}\n"
+
+    ts = to_add[0]["collected_at"]
+    payload = {
+        "message": f"data: collect {ts} ({len(to_add)} rows)",
+        "content": base64.b64encode(current.encode("utf-8")).decode(),
+    }
+    if sha:
+        payload["sha"] = sha
+
+    requests.put(url, headers=gh_headers, json=payload, timeout=10).raise_for_status()
+    print(f"[OK] {len(to_add)}행 커밋 완료 ({ts})")
+
+
+# ── 스케줄 작업 ───────────────────────────────────────────────────
+
+def collect_job():
+    try:
+        rows = scrape()
+        if rows:
+            commit_to_github(rows)
+    except Exception as e:
+        print(f"[ERROR] collect_job: {e}")
+
+
+scheduler = BackgroundScheduler(timezone=KST)
+# 08:00~17:50 KST — 매 10분
+scheduler.add_job(collect_job, CronTrigger(hour="8-17", minute="*/10", timezone=KST))
+# 18:00 KST
+scheduler.add_job(collect_job, CronTrigger(hour="18", minute="0", timezone=KST))
+scheduler.start()
+
+
+# ── 엔드포인트 ────────────────────────────────────────────────────
+
+@app.route("/status")
+def status():
+    return jsonify({"status": "ok"})
+
+
+@app.route("/collect")
+def collect():
+    """수동 즉시 수집 (테스트용)"""
+    try:
+        rows = scrape()
+        if not rows:
+            return jsonify({"status": "no_data"}), 200
+        commit_to_github(rows)
+        return jsonify({"status": "ok", "rows": len(rows)}), 200
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 200
 
 
 if __name__ == "__main__":
