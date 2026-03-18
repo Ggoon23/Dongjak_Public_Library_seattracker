@@ -192,5 +192,15 @@ def collect():
         return jsonify({"status": "error", "message": str(e)}), 200
 
 
+@app.route("/debug")
+def debug():
+    """파싱 결과 확인용 (커밋 없음)"""
+    try:
+        rows = scrape()
+        return jsonify({"status": "ok", "data": rows}), 200
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 200
+
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=3000)
