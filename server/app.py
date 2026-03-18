@@ -179,21 +179,29 @@ def dashboard():
 
 @app.route("/api/seats")
 def seats():
-    """seats.csv를 JSON으로 반환"""
+    """GitHub에서 최신 seats.csv를 읽어 JSON으로 반환"""
+    if not GITHUB_TOKEN or not GITHUB_REPO:
+        return jsonify({"status": "error", "message": "GITHUB_TOKEN 또는 GITHUB_REPO 환경변수 없음"}), 500
+
+    gh_headers = {
+        "Authorization": f"token {GITHUB_TOKEN}",
+        "Accept": "application/vnd.github.v3+json",
+    }
+    url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{CSV_PATH}"
+    resp = requests.get(url, headers=gh_headers, timeout=10)
+    if resp.status_code != 200:
+        return jsonify({"status": "error", "message": f"GitHub API {resp.status_code}"}), 502
+
+    content = base64.b64decode(resp.json()["content"]).decode("utf-8")
     rows = []
-    csv_path = os.path.join(os.path.dirname(__file__), "..", CSV_PATH)
-    try:
-        with open(csv_path, newline="", encoding="utf-8") as f:
-            for row in csv.DictReader(f):
-                rows.append({
-                    "collected_at": row["collected_at"],
-                    "room_name":    row["room_name"],
-                    "total_seats":  int(row["total_seats"]),
-                    "used_seats":   int(row["used_seats"]),
-                    "waiting":      int(row["waiting"]),
-                })
-    except FileNotFoundError:
-        return jsonify({"status": "error", "message": "seats.csv not found"}), 404
+    for row in csv.DictReader(io.StringIO(content)):
+        rows.append({
+            "collected_at": row["collected_at"],
+            "room_name":    row["room_name"],
+            "total_seats":  int(row["total_seats"]),
+            "used_seats":   int(row["used_seats"]),
+            "waiting":      int(row["waiting"]),
+        })
     return jsonify(rows)
 
 
