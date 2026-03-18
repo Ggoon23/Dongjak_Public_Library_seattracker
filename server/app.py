@@ -17,7 +17,7 @@ LIB_URL     = "http://djlib-seat.sen.go.kr/domian5.php"
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
 GITHUB_REPO  = os.environ.get("GITHUB_REPO", "")   # "유저명/레포명"
 CSV_PATH     = "data/seats.csv"
-FIELDNAMES   = ["collected_at", "room_name", "used_seats", "waiting", "usage_rate"]
+FIELDNAMES   = ["collected_at", "room_name", "total_seats", "used_seats", "waiting"]
 LIB_HEADERS  = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -78,20 +78,17 @@ def parse(html: bytes) -> list[dict]:
             if not texts[0].isdigit():
                 continue
             try:
-                used_seats = int(texts[3])
+                total_seats = int(texts[2])
+                used_seats  = int(texts[3])
             except ValueError:
                 continue
-            try:
-                usage_rate = int(texts[5].replace("%", "").strip())
-            except ValueError:
-                usage_rate = 0
             room_name = texts[1]
             rows.append({
                 "collected_at": collected_at,
-                "room_name": room_name,
-                "used_seats": used_seats,
-                "waiting": waiting_per_room.get(room_name, 0),
-                "usage_rate": usage_rate,
+                "room_name":    room_name,
+                "total_seats":  total_seats,
+                "used_seats":   used_seats,
+                "waiting":      waiting_per_room.get(room_name, 0),
             })
         break
 
@@ -139,7 +136,7 @@ def commit_to_github(new_rows: list[dict]):
     if not current.endswith("\n"):
         current += "\n"
     for r in to_add:
-        current += f"{r['collected_at']},{r['room_name']},{r['used_seats']},{r['waiting']},{r['usage_rate']}\n"
+        current += f"{r['collected_at']},{r['room_name']},{r['total_seats']},{r['used_seats']},{r['waiting']}\n"
 
     ts = to_add[0]["collected_at"]
     payload = {

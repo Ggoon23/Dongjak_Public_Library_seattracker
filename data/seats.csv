@@ -1,4 +1,1 @@
-collected_at,room_name,used_seats,waiting,usage_rate
-2026-03-18 13:19,1층 로비(나모아래),10,0,0
-2026-03-18 13:19,1층 디지털학습실,37,8,0
-2026-03-18 13:19,3층 자율학습실,38,7,0
+collected_at,room_name,total_seats,used_seats,waiting
