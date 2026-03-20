@@ -154,6 +154,7 @@
 <script>
 const roomChartInstances = {};
 let dowChartInstance = null;
+let masterTimes = [];
 
 const roomColors = {
   '1층 로비(나모아래)': { border: '#4299e1', bg: 'rgba(66,153,225,0.15)' },
@@ -191,8 +192,10 @@ function dateToKSTDow(dateStr) {
 function renderRoomChart(room, dayData) {
   const col       = roomColors[room] || { border: '#aaa', bg: 'rgba(170,170,170,0.1)' };
   const closeHour = ROOM_CLOSE_HOUR[room] || 22;
-  const allTimes  = [...new Set(dayData.map(d => d.collected_at))].sort();
-  const times     = allTimes.filter(t => parseInt(t.slice(11, 13)) < closeHour);
+  const date      = dayData[0]?.collected_at?.slice(0, 10) || '';
+  const times     = masterTimes
+    .filter(t => parseInt(t.slice(0, 2)) < closeHour)
+    .map(t => `${date} ${t}`);
   const [r, g, b] = col.border.slice(1).match(/.{2}/g).map(x => parseInt(x, 16));
 
   const datasets = [
@@ -216,6 +219,7 @@ function renderRoomChart(room, dayData) {
         const row = dayData.find(d => d.collected_at === t && d.room_name === room);
         return row ? pct(row) : null;
       }),
+      rawData: times.map(t => dayData.find(d => d.collected_at === t && d.room_name === room) || null),
       borderColor: col.border,
       backgroundColor: col.bg,
       fill: true,
@@ -238,9 +242,14 @@ function renderRoomChart(room, dayData) {
       plugins: {
         legend: { display: false },
         tooltip: { callbacks: {
-          label: ctx => ctx.dataset.yAxisID === 'yPct'
-            ? ` 점유율: ${ctx.parsed.y}%`
-            : ` 대기: ${ctx.parsed.y}명`
+          label: ctx => {
+            if (ctx.dataset.yAxisID === 'yPct') {
+              const row = ctx.dataset.rawData?.[ctx.dataIndex];
+              if (row) return ` 점유율: ${ctx.parsed.y}% (${row.used_seats}+${row.waiting}/${row.total_seats})`;
+              return ` 점유율: ${ctx.parsed.y}%`;
+            }
+            return ` 대기: ${ctx.parsed.y}명`;
+          }
         }}
       },
       scales: {
@@ -273,8 +282,8 @@ function renderDowChart(data, selectedDow) {
   // 해당 요일 데이터만
   const dowData = data.filter(d => dowDates.includes(d.collected_at.slice(0, 10)));
 
-  // 시간대 목록 (HH:MM)
-  const timeSlots = [...new Set(dowData.map(d => d.collected_at.slice(11, 16)))].sort();
+  // 시간대 목록 (HH:MM) — 전체 마스터 목록 사용으로 데이터 없는 시간대도 표시
+  const timeSlots = masterTimes;
   const rooms     = [...new Set(dowData.map(d => d.room_name))];
 
   const datasets = rooms.map(room => {
@@ -282,7 +291,7 @@ function renderDowChart(data, selectedDow) {
     return {
       label: room,
       data: timeSlots.map(t => {
-        const rows = dowData.filter(d => d.collected_at.slice(11, 16) === t && d.room_name === room);
+        const rows = dowData.filter(d => d.collected_at.slice(11, 16) === t && d.room_name === room && d.total_seats > 0);
         if (!rows.length) return null;
         return Math.round(rows.reduce((s, r) => s + pct(r), 0) / rows.length);
       }),
@@ -329,7 +338,8 @@ function renderAccordion(data) {
     const dow = DOW_LABELS[dateToKSTDow(date)];
 
     // 요약: 해당 날 평균 점유율
-    const avgPct = Math.round(dayRows.reduce((s, r) => s + pct(r), 0) / dayRows.length);
+    const validRows = dayRows.filter(r => r.total_seats > 0);
+    const avgPct = validRows.length ? Math.round(validRows.reduce((s, r) => s + pct(r), 0) / validRows.length) : 0;
 
     const btn = document.createElement('button');
     btn.className = 'accordion-date';
@@ -393,6 +403,7 @@ let currentDow  = null;
 function renderDashboard(allData) {
   const data  = allData;
   const dates = [...new Set(data.map(d => d.collected_at.slice(0, 10)))].sort();
+  masterTimes = [...new Set(data.map(d => d.collected_at.slice(11, 16)))].sort();
 
   document.getElementById('subtitle').textContent =
     `수집 기간: ${dates[0]} ~ ${dates[dates.length - 1]} · ${dates.length}일치 데이터`;

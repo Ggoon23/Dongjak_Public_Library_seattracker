@@ -3,25 +3,26 @@
 동작구립도서관 열람실 좌석 현황을 10분마다 자동 수집해 CSV로 누적 저장합니다.
 
 - **Cloudtype**: 한국 서버에서 직접 스크래핑 + GitHub API로 커밋 (해외 IP 차단 우회)
-- **GitHub Actions**: 1시간마다 서버 생존 확인 → 다운 시 자동 재시작
+- **GitHub Actions**: 1시간마다 서버 생존 확인 → 다운 시 Slack 알림
 
 ## 구조
 
 ```
 Cloudtype Flask 서버 (한국 서버)
-    └─ APScheduler: 10분마다 (KST 08:00~18:00)
-        ├─ 도서관 페이지 스크래핑
-        └─ GitHub API로 data/seats.csv에 직접 커밋
+    └─ APScheduler
+        ├─ 10분마다 (KST 08:00~21:50): 도서관 페이지 스크래핑 → 로컬 CSV 저장
+        ├─ 22:00: 자율학습실 마지막 수집
+        └─ 매 정시 (08~22시): GitHub API로 data/seats.csv 커밋
 
 GitHub Actions
     └─ 1시간마다 GET /status 헬스체크
-        └─ 다운 시 ctype CLI로 재시작
+        └─ 다운 시 Slack 알림
 ```
 
 ## 파일 구성
 
 ```
-├── .github/workflows/collect.yml   # 헬스체크 + 재시작 워크플로우
+├── .github/workflows/collect.yml   # 헬스체크 + Slack 알림 워크플로우
 ├── server/
 │   ├── app.py                      # Flask 서버 (Cloudtype 배포)
 │   └── requirements.txt
@@ -80,7 +81,7 @@ GitHub Actions
 | Secret | 값 |
 |---|---|
 | `CLOUDTYPE_URL` | Cloudtype 서비스 URL |
-| `CLOUDTYPE_TOKEN` | Cloudtype API 토큰 |
+| `SLACK_WEBHOOK_URL` | Slack Incoming Webhook URL |
 
 ### 3. 동작 확인
 
