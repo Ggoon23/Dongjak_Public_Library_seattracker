@@ -26,28 +26,9 @@ jobs:
             echo "Server is down"
           fi
 
-      - name: Redeploy server if down
-        if: steps.health.outputs.alive != 'true'
-        uses: cloudtype-github-actions/deploy@v1
-        with:
-          token: ${{ secrets.CLOUDTYPE_TOKEN }}
-          project: dongjak-public-library-seattracker
-          stage: main
-          file: ./cloudtype.yaml
-
-      - name: Wait for redeploy
+      - name: Notify Slack if down
         if: steps.health.outputs.alive != 'true'
         run: |
-          echo "Redeployed. Waiting 90s..."
-          sleep 90
-
-      - name: Verify after restart
-        if: steps.health.outputs.alive != 'true'
-        run: |
-          body=$(curl -s --max-time 10 "${{ secrets.CLOUDTYPE_URL }}/status" || echo "")
-          if echo "$body" | grep -q '"ok"'; then
-            echo "Server recovered successfully"
-          else
-            echo "Server still down after restart"
-            exit 1
-          fi
+          curl -s -X POST "${{ secrets.SLACK_WEBHOOK_URL }}" \
+            -H 'Content-type: application/json' \
+            --data '{"text": ":red_circle: *동작도서관 서버 다운*\nCloudType 서버가 응답하지 않습니다. 확인이 필요합니다."}'
