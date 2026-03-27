@@ -109,6 +109,30 @@
     .status-normal { background: #c6f6d5; color: #276749; }
 
     footer { text-align: center; font-size: 0.72rem; color: #a0aec0; margin-top: 20px; }
+
+    /* 차트 가로 스크롤 래퍼 */
+    .chart-wrap {
+      overflow-x: auto;
+      -webkit-overflow-scrolling: touch;
+    }
+    .chart-wrap canvas {
+      min-width: 700px;  /* 데스크톱은 자연스럽게 fit, 모바일은 스크롤 */
+      height: 140px !important;
+    }
+    #dowChart {
+      min-width: 700px;
+    }
+    .dow-chart-wrap {
+      overflow-x: auto;
+      -webkit-overflow-scrolling: touch;
+    }
+
+    @media (max-width: 600px) {
+      body { padding: 12px; }
+      .section { padding: 14px; }
+      h1 { font-size: 1.1rem; }
+      .date-tab, .dow-tab { font-size: 0.72rem; padding: 4px 10px; }
+    }
   </style>
 </head>
 <body>
@@ -122,16 +146,16 @@
   <div class="date-tabs" id="dateTabs"></div>
   <div style="display:flex;flex-direction:column;gap:20px;">
     <div>
-      <div style="font-size:0.78rem;font-weight:600;color:#2b6cb0;margin-bottom:8px;">1층 로비(나모아래) <span style="font-weight:400;color:#a0aec0;">~18:00</span></div>
-      <canvas id="chart-1층 로비(나모아래)" height="60"></canvas>
+      <div style="font-size:0.78rem;font-weight:600;color:#2b6cb0;margin-bottom:8px;">1층 로비(나모아래) <span style="font-weight:400;color:#a0aec0;">07:00~22:00</span></div>
+      <div class="chart-wrap"><canvas id="chart-1층 로비(나모아래)"></canvas></div>
     </div>
     <div>
-      <div style="font-size:0.78rem;font-weight:600;color:#276749;margin-bottom:8px;">1층 디지털학습실 <span style="font-weight:400;color:#a0aec0;">~18:00</span></div>
-      <canvas id="chart-1층 디지털학습실" height="60"></canvas>
+      <div style="font-size:0.78rem;font-weight:600;color:#276749;margin-bottom:8px;">1층 디지털학습실 <span style="font-weight:400;color:#a0aec0;">07:00~22:00</span></div>
+      <div class="chart-wrap"><canvas id="chart-1층 디지털학습실"></canvas></div>
     </div>
     <div>
-      <div style="font-size:0.78rem;font-weight:600;color:#c05621;margin-bottom:8px;">3층 자율학습실 <span style="font-weight:400;color:#a0aec0;">~22:00</span></div>
-      <canvas id="chart-3층 자율학습실" height="60"></canvas>
+      <div style="font-size:0.78rem;font-weight:600;color:#c05621;margin-bottom:8px;">3층 자율학습실 <span style="font-weight:400;color:#a0aec0;">07:00~22:00</span></div>
+      <div class="chart-wrap"><canvas id="chart-3층 자율학습실"></canvas></div>
     </div>
   </div>
 </div>
@@ -140,7 +164,7 @@
 <div class="section">
   <div class="section-title">📅 요일별 시간대 평균 점유율 — 언제 사람이 많나?</div>
   <div class="dow-tabs" id="dowTabs"></div>
-  <canvas id="dowChart" height="70"></canvas>
+  <div class="dow-chart-wrap"><canvas id="dowChart" style="height:160px !important;min-width:700px;"></canvas></div>
 </div>
 
 <!-- 상세 데이터 아코디언 -->
@@ -165,11 +189,8 @@ const roomColors = {
 const DOW_LABELS = ['일', '월', '화', '수', '목', '금', '토'];
 const DOW_COLORS = ['#fc8181','#68d391','#63b3ed','#f6ad55','#b794f4','#76e4f7','#fbd38d'];
 
-const ROOM_CLOSE_HOUR = {
-  '1층 로비(나모아래)': 18,
-  '1층 디지털학습실':   18,
-  '3층 자율학습실':    22,
-};
+const ROOM_OPEN_HOUR  = 7;
+const ROOM_CLOSE_HOUR = 22;
 
 function addOneMinute(hhmm) {
   const [h, m] = hhmm.split(':').map(Number);
@@ -189,9 +210,9 @@ function dateToKSTDow(dateStr) {
 }
 
 function generateAllTimeSlots(offset) {
-  // 08:XX ~ 21:59 범위를 10분 간격으로 생성 (도서관 타임스탬프 분 offset 사용)
+  // 06:XX ~ 21:59 범위를 10분 간격으로 생성 (필터에서 07:00 이후만 사용)
   const slots = [];
-  for (let total = 8 * 60 + offset; total < 22 * 60; total += 10) {
+  for (let total = 6 * 60 + offset; total < 22 * 60; total += 10) {
     const h = Math.floor(total / 60);
     const m = total % 60;
     slots.push(`${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}`);
@@ -202,10 +223,9 @@ function generateAllTimeSlots(offset) {
 // ── 날짜별 룸별 3분할 차트 ───────────────────────────────────────
 function renderRoomChart(room, dayData) {
   const col          = roomColors[room] || { border: '#aaa', bg: 'rgba(170,170,170,0.1)' };
-  const closeHour    = ROOM_CLOSE_HOUR[room] || 22;
   const date         = dayData[0]?.collected_at?.slice(0, 10) || '';
   const times        = masterTimes
-    .filter(t => addOneMinute(t) >= '09:00' && parseInt(t.slice(0, 2)) < closeHour)
+    .filter(t => addOneMinute(t) >= '07:00' && parseInt(t.slice(0, 2)) < ROOM_CLOSE_HOUR)
     .map(t => `${date} ${t}`);
   const displayLabels = times.map(t => addOneMinute(t.slice(11, 16)));
   const [r, g, b] = col.border.slice(1).match(/.{2}/g).map(x => parseInt(x, 16));
@@ -236,8 +256,8 @@ function renderRoomChart(room, dayData) {
       backgroundColor: col.bg,
       fill: true,
       tension: 0.3,
-      pointRadius: 2,
-      pointHoverRadius: 4,
+      pointRadius: 0,
+      pointHoverRadius: 5,
       yAxisID: 'yPct',
       order: 1,
     },
@@ -300,7 +320,7 @@ function renderDowChart(data, selectedDow) {
   const dowData = data.filter(d => dowDates.includes(d.collected_at.slice(0, 10)));
 
   // 시간대 목록 (HH:MM) — 전체 마스터 목록 사용, 09:00 이후만 표시
-  const timeSlots    = masterTimes.filter(t => addOneMinute(t) >= '09:00');
+  const timeSlots    = masterTimes.filter(t => addOneMinute(t) >= '07:00');
   const displaySlots = timeSlots.map(t => addOneMinute(t));
   const rooms     = [...new Set(dowData.map(d => d.room_name))];
 
@@ -317,7 +337,7 @@ function renderDowChart(data, selectedDow) {
       backgroundColor: col.bg,
       fill: true,
       tension: 0.3,
-      pointRadius: 3,
+      pointRadius: 0,
       pointHoverRadius: 5,
     };
   });

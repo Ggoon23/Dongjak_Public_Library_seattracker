@@ -2,6 +2,7 @@ import base64
 import csv
 import io
 import os
+import time
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
@@ -19,12 +20,12 @@ GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
 GITHUB_REPO  = os.environ.get("GITHUB_REPO", "")   # "유저명/레포명"
 CSV_PATH     = "data/seats.csv"
 FIELDNAMES   = ["collected_at", "room_name", "total_seats", "used_seats", "waiting"]
-# 룸별 운영 종료 시각 (해당 시각 이후 수집 제외)
-ROOM_CLOSE_HOUR = {
-    "1층 로비(나모아래)": 18,
-    "1층 디지털학습실":   18,
-    "3층 자율학습실":    22,
-}
+COLLECT_OPEN_HOUR  = 7   # 수집 시작 시각 (KST)
+COLLECT_CLOSE_HOUR = 22  # 수집 종료 시각 (KST, 미만)
+
+# DoS 방어: /collect, /debug 수동 엔드포인트 쿨다운
+_last_manual_trigger: float = 0
+_MANUAL_COOLDOWN = 60  # 초
 LOCAL_CSV    = Path(__file__).parent.parent / CSV_PATH
 LIB_HEADERS  = {
     "User-Agent": (
@@ -215,13 +216,12 @@ def commit_to_github():
 
 def collect_job():
     try:
+        now_hour = datetime.now(KST).hour
+        if not (COLLECT_OPEN_HOUR <= now_hour < COLLECT_CLOSE_HOUR):
+            return
         rows = scrape()
         if rows:
-            now_hour = datetime.now(KST).hour
-            open_rows = [r for r in rows
-                         if now_hour < ROOM_CLOSE_HOUR.get(r["room_name"], 18)]
-            if open_rows:
-                append_to_local_csv(open_rows)
+            append_to_local_csv(rows)
     except Exception as e:
         print(f"[ERROR] collect_job: {e}")
 
@@ -236,12 +236,10 @@ def hourly_commit_job():
 init_local_csv()
 
 scheduler = BackgroundScheduler(timezone=KST)
-# 08:00~21:50 KST — 매 10분 수집 (룸별 운영시간은 collect_job 내부에서 필터링)
-scheduler.add_job(collect_job, CronTrigger(hour="8-21", minute="*/10", timezone=KST))
-# 22:00 KST — 자율학습실 마지막 수집
-scheduler.add_job(collect_job, CronTrigger(hour="22", minute="0", timezone=KST))
-# 매 정시 GitHub 커밋 (08~22시)
-scheduler.add_job(hourly_commit_job, CronTrigger(hour="8-22", minute="0", timezone=KST))
+# 07:00~21:50 KST — 매 10분 수집
+scheduler.add_job(collect_job, CronTrigger(hour="7-21", minute="*/10", timezone=KST))
+# 매 정시 GitHub 커밋 (07~22시)
+scheduler.add_job(hourly_commit_job, CronTrigger(hour="7-22", minute="0", timezone=KST))
 scheduler.start()
 
 
@@ -310,6 +308,12 @@ def status():
 @app.route("/collect")
 def collect():
     """수동 즉시 수집 (테스트용)"""
+    global _last_manual_trigger
+    now = time.time()
+    if now - _last_manual_trigger < _MANUAL_COOLDOWN:
+        retry = int(_MANUAL_COOLDOWN - (now - _last_manual_trigger))
+        return jsonify({"status": "rate_limited", "retry_after": retry}), 429
+    _last_manual_trigger = now
     try:
         rows = scrape()
         if not rows:
@@ -323,6 +327,12 @@ def collect():
 @app.route("/debug")
 def debug():
     """파싱 결과 확인용 (저장 없음)"""
+    global _last_manual_trigger
+    now = time.time()
+    if now - _last_manual_trigger < _MANUAL_COOLDOWN:
+        retry = int(_MANUAL_COOLDOWN - (now - _last_manual_trigger))
+        return jsonify({"status": "rate_limited", "retry_after": retry}), 429
+    _last_manual_trigger = now
     try:
         rows = scrape()
         return jsonify({"status": "ok", "data": rows}), 200
