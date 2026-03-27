@@ -111,20 +111,12 @@
     footer { text-align: center; font-size: 0.72rem; color: #a0aec0; margin-top: 20px; }
 
     /* 차트 가로 스크롤 래퍼 */
-    .chart-wrap {
+    .chart-wrap, .dow-chart-wrap {
       overflow-x: auto;
       -webkit-overflow-scrolling: touch;
     }
-    .chart-wrap canvas {
-      min-width: 700px;  /* 데스크톱은 자연스럽게 fit, 모바일은 스크롤 */
-      height: 140px !important;
-    }
-    #dowChart {
-      min-width: 700px;
-    }
-    .dow-chart-wrap {
-      overflow-x: auto;
-      -webkit-overflow-scrolling: touch;
+    .chart-wrap canvas, .dow-chart-wrap canvas {
+      display: block;
     }
 
     @media (max-width: 600px) {
@@ -164,7 +156,7 @@
 <div class="section">
   <div class="section-title">📅 요일별 시간대 평균 점유율 — 언제 사람이 많나?</div>
   <div class="dow-tabs" id="dowTabs"></div>
-  <div class="dow-chart-wrap"><canvas id="dowChart" style="height:160px !important;min-width:700px;"></canvas></div>
+  <div class="dow-chart-wrap"><canvas id="dowChart"></canvas></div>
 </div>
 
 <!-- 상세 데이터 아코디언 -->
@@ -265,11 +257,14 @@ function renderRoomChart(room, dayData) {
 
   const canvasId = 'chart-' + room;
   if (roomChartInstances[room]) roomChartInstances[room].destroy();
-  roomChartInstances[room] = new Chart(document.getElementById(canvasId), {
+  const canvas = document.getElementById(canvasId);
+  canvas.width  = Math.max(900, displayLabels.length * 12);
+  canvas.height = 180;
+  roomChartInstances[room] = new Chart(canvas, {
     type: 'line',
     data: { labels: displayLabels, datasets },
     options: {
-      responsive: true,
+      responsive: false,
       interaction: { mode: 'index', intersect: false },
       plugins: {
         legend: { display: false },
@@ -343,14 +338,17 @@ function renderDowChart(data, selectedDow) {
   });
 
   if (dowChartInstance) dowChartInstance.destroy();
-  dowChartInstance = new Chart(document.getElementById('dowChart'), {
+  const dowCanvas = document.getElementById('dowChart');
+  dowCanvas.width  = Math.max(900, displaySlots.length * 12);
+  dowCanvas.height = 200;
+  dowChartInstance = new Chart(dowCanvas, {
     type: 'line',
     data: {
       labels: displaySlots,
       datasets,
     },
     options: {
-      responsive: true,
+      responsive: false,
       interaction: { mode: 'index', intersect: false },
       plugins: {
         legend: { position: 'top' },
