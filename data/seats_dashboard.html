@@ -236,7 +236,7 @@ function renderRoomChart(room, dayData) {
       label: '대기',
       data: times.map(t => {
         const row = dayData.find(d => d.collected_at === t && d.room_name === room);
-        return row ? row.waiting : 0;
+        return (row && row.waiting > 0) ? row.waiting : null;
       }),
       backgroundColor: `rgba(${r},${g},${b},0.2)`,
       borderColor: col.border,
